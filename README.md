@@ -9,7 +9,7 @@
 | 层级 | 说明 |
 |------|------|
 | 前端 | Vue 3、TypeScript、Vite、Vue Router、Pinia、Element Plus |
-| 本地对话服务 | Node.js、Fastify、LangChain / LangGraph（`createReactAgent`）、SSE 流式输出 |
+| 本地对话服务 | Node.js、Fastify、LangChain / LangGraph（createReactAgent）、SSE 流式输出 |
 
 ---
 
@@ -31,6 +31,19 @@
    `cd server && npm install`  
    在.env配置自己的apikey
    `npm run dev`
+
+
+---
+
+## 运行截图
+
+首页
+<img width="3185" height="1721" alt="主题" src="https://github.com/user-attachments/assets/45da4076-15af-4ea7-9189-871987c19b9f" />
+对话页面
+<img width="3185" height="1721" alt="Snipaste_2026-05-02_20-17-28" src="https://github.com/user-attachments/assets/8c9aab96-b7d2-4729-a12b-e3180792e80f" />
+后台管理
+<img width="3185" height="1721" alt="Snipaste_2026-05-02_13-45-50" src="https://github.com/user-attachments/assets/a487abad-e51f-4c6a-b834-fd272eb53f65" />
+<img width="3185" height="1721" alt="Snipaste_2026-05-02_13-56-40" src="https://github.com/user-attachments/assets/092010af-c392-4fe0-9503-8f098c303560" />
 
 
 ---
