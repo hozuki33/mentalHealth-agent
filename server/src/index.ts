@@ -2,19 +2,24 @@
 import 'dotenv/config'
 import cors from '@fastify/cors'
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify'
-import { BaseMessage, HumanMessage } from '@langchain/core/messages'
+import { HumanMessage } from '@langchain/core/messages'
 import { ChatOpenAI } from '@langchain/openai'
 import { streamReactAgentToSse } from './agentStream.js'
 import { type ClientGeo, type EmotionGardenSnapshot, snapshotToEmotionApiBody } from './agentTools.js'
 import { sseLine } from './sseLine.js'
+import {
+  createSessionRecord,
+  SqliteSessionStore,
+  touchSessionRecord,
+  type SessionStore,
+} from './memory/sessionStore.js'
 
 const SYSTEM_PROMPT = `你是「小暖」，AI 心理健康陪伴助手。
 原则：共情、不评判、不提供诊断或处方；鼓励专业求助；若用户表达自伤/伤人或紧急风险，请明确建议立即联系当地紧急服务或专业人士。
 回答简洁、温暖，必要时分点说明。`
 
-const sessions = new Map<string, BaseMessage[]>()
-
-const emotionSnapshots = new Map<string, EmotionGardenSnapshot>()
+/** 会话状态存储：默认 SQLite 持久化，进程重启 / 多次部署不再丢失历史与情绪快照 */
+const sessionStore: SessionStore = new SqliteSessionStore()
 
 let sessionSeq = 11600
 
@@ -55,7 +60,16 @@ async function pipeAgentSse(
   }
 
   try {
-    const history = sessions.get(sessionId) ?? []
+    const existing = await sessionStore.get(sessionId)
+    const record = existing ?? createSessionRecord(sessionId)
+    const history = record.messages
+
+    // agentStream 内部按引用往这个 Map 里写入情绪快照，请求结束后统一落库
+    const emotionScratch = new Map<string, EmotionGardenSnapshot>()
+    if (record.emotionSnapshot) {
+      emotionScratch.set(sessionId, record.emotionSnapshot)
+    }
+
     const llm = buildModel()
     const { assistantText, nextHistory } = await streamReactAgentToSse({
       raw: reply.raw,
@@ -66,9 +80,15 @@ async function pipeAgentSse(
       userText,
       sessionId,
       geo,
-      emotionSnapshots,
+      emotionSnapshots: emotionScratch,
     })
-    sessions.set(sessionId, nextHistory)
+
+    const updated = touchSessionRecord(record, {
+      messages: nextHistory,
+      emotionSnapshot: emotionScratch.get(sessionId) ?? record.emotionSnapshot,
+    })
+    await sessionStore.set(updated)
+
     if (!assistantText) {
       reply.raw.write(sseLine({ content: '我先陪你待着，你可以再说说此刻的感受吗？' }))
     }
@@ -208,14 +228,10 @@ app.post('/psychological-chat/session/start', async (request) => {
 
   sessionSeq += 1
   const sessionId = `session_${sessionSeq}`
-  const startTime = Date.now()
-  const expiryTime = startTime + 24 * 60 * 60 * 1000
 
-  if (initialTrim) {
-    sessions.set(sessionId, [new HumanMessage(initialTrim)])
-  } else {
-    sessions.set(sessionId, [])
-  }
+  const initialMessages = initialTrim ? [new HumanMessage(initialTrim)] : []
+  const record = createSessionRecord(sessionId, initialMessages)
+  await sessionStore.set(record)
 
   const messageCount = initialTrim ? 1 : 0
 
@@ -226,8 +242,8 @@ app.post('/psychological-chat/session/start', async (request) => {
       sessionId,
       userHash: userHashFromToken(token),
       initialMessage: initialEcho,
-      startTime,
-      expiryTime,
+      startTime: record.createdAt,
+      expiryTime: record.expiryTime,
       status: 'ACTIVE' as const,
       messageCount,
     },
@@ -272,7 +288,8 @@ app.post('/local-agent/stream', async (request, reply) => {
 
 app.get('/local-agent/session/:sessionId/emotion', async (request) => {
   const sessionId = String((request.params as { sessionId?: string }).sessionId ?? '')
-  const snap = emotionSnapshots.get(sessionId)
+  const record = await sessionStore.get(sessionId)
+  const snap = record?.emotionSnapshot
   if (!snap) {
     return {
       label: '中性',
@@ -288,8 +305,28 @@ app.get('/local-agent/session/:sessionId/emotion', async (request) => {
   return snapshotToEmotionApiBody(snap)
 })
 
+/** 每小时清理一次已过期会话，让 expiryTime（默认 24h）真正生效 */
+const PURGE_INTERVAL_MS = 60 * 60 * 1000
+const purgeTimer = setInterval(() => {
+  sessionStore
+    .purgeExpired()
+    .then((count) => {
+      if (count > 0) app.log.info(`已清理 ${count} 个过期会话`)
+    })
+    .catch((err) => app.log.error(err))
+}, PURGE_INTERVAL_MS)
+purgeTimer.unref()
+
 const port = Number(process.env.PORT ?? 8787)
 const host = process.env.HOST ?? '0.0.0.0'
 
 await app.listen({ port, host })
 app.log.info(`chat server listening http://${host}:${port}`)
+
+const shutdown = () => {
+  clearInterval(purgeTimer)
+  sessionStore.close()
+  process.exit(0)
+}
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
