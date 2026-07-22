@@ -26,21 +26,26 @@ export function buildAgentSystemPrompt(baseSystem: string, geo: ClientGeo): stri
   return `${baseSystem.trim()}\n\n${geoBlock(geo)}\n${toolRules.trim()}`
 }
 
-export async function streamReactAgentToSse(params: {
-  raw: ServerResponse
-  log: FastifyBaseLogger
-  llm: ChatOpenAI
-  baseSystem: string
-  history: BaseMessage[]
-  userText: string
-  sessionId: string
-  geo: ClientGeo
-  emotionSnapshots: Map<string, EmotionGardenSnapshot>
-}): Promise<{ assistantText: string; nextHistory: BaseMessage[] }> {
-  const { raw, log, llm, baseSystem, history, userText, sessionId, geo, emotionSnapshots } = params
-
-  const tools = buildAgentTools(sessionId, emotionSnapshots, geo)
-  const prompt = buildAgentSystemPrompt(baseSystem, geo)
+export async function streamReactAgentToSse(params: {
+  raw: ServerResponse
+  log: FastifyBaseLogger
+  llm: ChatOpenAI
+  baseSystem: string
+  history: BaseMessage[]
+  userText: string
+  sessionId: string
+  geo: ClientGeo
+  emotionSnapshots: Map<string, EmotionGardenSnapshot>
+  /** 历史对话摘要（滑动窗口压缩产物），有值时拼入 system prompt */
+  summary?: string
+}): Promise<{ assistantText: string; nextHistory: BaseMessage[] }> {
+  const { raw, log, llm, baseSystem, history, userText, sessionId, geo, emotionSnapshots, summary } = params
+
+  const tools = buildAgentTools(sessionId, emotionSnapshots, geo)
+  const effectiveSystem = summary
+    ? `${baseSystem}\n\n【历史对话摘要】\n${summary}`
+    : baseSystem
+  const prompt = buildAgentSystemPrompt(effectiveSystem, geo)
   const agent = createReactAgent({
     llm,
     tools,

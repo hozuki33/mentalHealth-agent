@@ -13,6 +13,7 @@ import {
   touchSessionRecord,
   type SessionStore,
 } from './memory/sessionStore.js'
+import { shouldCompress, compressHistory } from './memory/summarize.js'
 
 const SYSTEM_PROMPT = `你是「小暖」，AI 心理健康陪伴助手。
 原则：共情、不评判、不提供诊断或处方；鼓励专业求助；若用户表达自伤/伤人或紧急风险，请明确建议立即联系当地紧急服务或专业人士。
@@ -62,7 +63,22 @@ async function pipeAgentSse(
   try {
     const existing = await sessionStore.get(sessionId)
     const record = existing ?? createSessionRecord(sessionId)
-    const history = record.messages
+    let history = record.messages
+    let { summary } = record
+
+    const llm = buildModel()
+
+    // ── 滑动窗口摘要压缩：历史 token 数超限时触发 ──
+    if (shouldCompress(history)) {
+      request.log.info(`会话 ${sessionId} 历史超限，触发摘要压缩`)
+      const compressed = await compressHistory({
+        llm,
+        messages: history,
+        previousSummary: summary,
+      })
+      history = compressed.trimmedMessages
+      summary = compressed.summary
+    }
 
     // agentStream 内部按引用往这个 Map 里写入情绪快照，请求结束后统一落库
     const emotionScratch = new Map<string, EmotionGardenSnapshot>()
@@ -70,7 +86,6 @@ async function pipeAgentSse(
       emotionScratch.set(sessionId, record.emotionSnapshot)
     }
 
-    const llm = buildModel()
     const { assistantText, nextHistory } = await streamReactAgentToSse({
       raw: reply.raw,
       log: request.log,
@@ -81,10 +96,12 @@ async function pipeAgentSse(
       sessionId,
       geo,
       emotionSnapshots: emotionScratch,
+      summary,
     })
 
     const updated = touchSessionRecord(record, {
       messages: nextHistory,
+      summary,
       emotionSnapshot: emotionScratch.get(sessionId) ?? record.emotionSnapshot,
     })
     await sessionStore.set(updated)
